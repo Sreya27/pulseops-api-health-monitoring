@@ -26,6 +26,7 @@ import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.TimeoutException;
 
 @Component
 @ConditionalOnProperty(name = "pulseops.monitor.worker-enabled", havingValue = "true", matchIfMissing = true)
@@ -81,13 +82,19 @@ public class MonitorWorker {
                 List<MapRecord<String, Object, Object>> messages = redisTemplate.opsForStream().read(
                         Consumer.from(groupName, consumerName),
                         StreamReadOptions.empty().count(10).block(Duration.ofSeconds(2)),
-                        StreamOffset.create(streamName, ReadOffset.lastConsumed())
-                );
+                        StreamOffset.create(streamName, ReadOffset.lastConsumed()));
                 if (messages != null) {
                     for (MapRecord<String, Object, Object> message : messages) {
                         String monitorIdStr = (String) message.getValue().get("monitorId");
                         if (monitorIdStr != null) {
-                            executor.submit(() -> processMonitor(Long.parseLong(monitorIdStr)));
+                            executor.submit(() -> {
+                                // Exceptions inside submit() are otherwise swallowed by the Future.
+                                try {
+                                    processMonitor(Long.parseLong(monitorIdStr));
+                                } catch (Exception e) {
+                                    log.error("Check for monitor {} failed unexpectedly", monitorIdStr, e);
+                                }
+                            });
                         }
                         redisTemplate.opsForStream().acknowledge(streamName, groupName, message.getId());
                     }
@@ -97,12 +104,17 @@ public class MonitorWorker {
                     break;
                 }
                 log.debug("Worker loop error: {}", e.getMessage());
-                try { Thread.sleep(2000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                try {
+                    Thread.sleep(2000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
             }
         }
     }
 
-    private void processMonitor(Long monitorId) {
+    void processMonitor(Long monitorId) {
         Monitor monitor;
         try {
             monitor = monitorService.getEntityById(monitorId);
@@ -118,23 +130,23 @@ public class MonitorWorker {
 
         try {
             HttpMethod httpMethod = HttpMethod.valueOf(monitor.getMethod().name());
-            var response = webClientBuilder.build()
+            // The body is released so the pooled connection is returned.
+            statusCode = webClientBuilder.build()
                     .method(httpMethod)
                     .uri(monitor.getUrl())
-                    .retrieve()
-                    .toBodilessEntity()
+                    .exchangeToMono(response -> response.releaseBody()
+                            .thenReturn(response.statusCode().value()))
                     .timeout(Duration.ofSeconds(monitor.getTimeoutSeconds()))
                     .block();
 
-            if (response != null) {
-                statusCode = response.getStatusCode().value();
-                success = Objects.equals(statusCode, monitor.getExpectedStatusCode());
-                if (!success) {
-                    errorMessage = "Expected " + monitor.getExpectedStatusCode() + " but got " + statusCode;
-                }
+            success = Objects.equals(statusCode, monitor.getExpectedStatusCode());
+            if (!success) {
+                errorMessage = "Expected " + monitor.getExpectedStatusCode() + " but got " + statusCode;
             }
         } catch (Exception e) {
-            errorMessage = e.getClass().getSimpleName() + ": " + e.getMessage();
+            // Only transport-level failures land here now: timeout, DNS, connection
+            // refused, TLS.
+            errorMessage = describeFailure(e, monitor.getTimeoutSeconds());
             success = false;
         }
 
@@ -159,6 +171,22 @@ public class MonitorWorker {
         }
 
         log.debug("Checked {} → success={} latency={}ms status={}", monitor.getUrl(), success, latencyMs, statusCode);
+    }
+
+    /**
+     * Short, human-readable incident reason for transport failures.
+     * block() wraps checked exceptions, so we walk to the root cause.
+     */
+    static String describeFailure(Throwable e, int timeoutSeconds) {
+        Throwable root = e;
+        while (root.getCause() != null && root.getCause() != root) {
+            root = root.getCause();
+        }
+        if (root instanceof TimeoutException || e instanceof TimeoutException) {
+            return "Timed out after " + timeoutSeconds + "s";
+        }
+        String msg = root.getMessage() != null ? root.getMessage() : root.getClass().getSimpleName();
+        return "Connection failed: " + msg;
     }
 
 }
