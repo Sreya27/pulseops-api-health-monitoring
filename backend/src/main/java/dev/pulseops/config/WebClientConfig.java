@@ -14,12 +14,15 @@ import java.util.concurrent.TimeUnit;
 @Configuration
 public class WebClientConfig {
 
+    private static final int MAX_CHECK_TIMEOUT_SECONDS = 60;
+
     @Bean
     public WebClient.Builder webClientBuilder() {
         HttpClient httpClient = HttpClient.create()
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10000)
-                .responseTimeout(Duration.ofSeconds(10))
-                .doOnConnected(conn -> conn.addHandlerLast(new ReadTimeoutHandler(10, TimeUnit.SECONDS)));
+                .responseTimeout(Duration.ofSeconds(MAX_CHECK_TIMEOUT_SECONDS))
+                .doOnConnected(conn -> conn.addHandlerLast(
+                        new ReadTimeoutHandler(MAX_CHECK_TIMEOUT_SECONDS, TimeUnit.SECONDS)));
         return WebClient.builder()
                 .clientConnector(new ReactorClientHttpConnector(httpClient));
     }
