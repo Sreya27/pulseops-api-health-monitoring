@@ -177,7 +177,8 @@ Found during code review and being fixed now:
 - [ ] **Expired or invalid JWTs return 403 instead of 401.** No authentication entry point is configured, so the frontend can't tell "log in again" apart from "not allowed".
 - [ ] **The dashboard doesn't auto-refresh.** Status and "last checked" go stale until you reload.
 - [ ] **Some dashboard aggregates are wrong.** Recent checks only cover the first project, and uptime shows the worst project rather than overall uptime.
-      Later:
+
+Later:
 
 - [ ] TLS certificate expiry monitoring (expiry date, days remaining, issuer; warning threshold leads to an incident)
 - [ ] Worker reliability: acknowledge stream messages only after the check is persisted, and handle retries and pending messages
